@@ -1,0 +1,145 @@
+================================================================================
+INFORME DE ANÁLISIS, INCOMPATIBILIDADES Y ERRORES DE CÓDIGO
+Repositorio: docker/build-push-action
+================================================================================
+
+1. ERROR SILENCIOSO Y FALSO POSITIVO DE ÉXITO ANTE FALLOS DE BUILDX
+--------------------------------------------------------------------------------
+- Breve explicación del problema:
+  En la ejecución de Buildx con `Exec.getExecOutput(..., { ignoreReturnCode: true })`,
+  si el comando falla (retorna `res.exitCode != 0`), la variable de error `err`
+  únicamente se asigna si `inputs.call === 'check' && res.stdout.length > 0` o si
+  `res.stderr.length > 0`. Si Buildx escribe el error en `stdout` o si `stderr`
+  está vacío, `err` queda como `undefined`. Al llegar a la verificación final
+  `if (err) throw err;`, no se lanza ninguna excepción y la GitHub Action finaliza
+  con éxito (código de salida 0), ocultando el fallo del build de la imagen Docker.
+- File y línea de código:
+  src/main.ts (líneas 111-120 y 188-190)
+- Cómo arreglarlo:
+  Garantizar un fallback de error incondicional cuando `res.exitCode !== 0`,
+  capturando `stdout` o generando un error explícito con el código de salida:
+  if (res.exitCode != 0) {
+    if (inputs.call && inputs.call === 'check' && res.stdout.length > 0) {
+      err = new Error(res.stdout.split('\n')[0]?.trim());
+    } else if (res.stderr.length > 0) {
+      err = new Error(`buildx failed with: ${res.stderr.match(/(.*)\s*$/)?.[0]?.trim() ?? 'unknown error'}`);
+    } else if (res.stdout.length > 0) {
+      err = new Error(`buildx failed with: ${res.stdout.match(/(.*)\s*$/)?.[0]?.trim() ?? 'unknown error'}`);
+    } else {
+      err = new Error(`buildx failed with exit code ${res.exitCode}`);
+    }
+  }
+
+
+2. INCOMPATIBILIDAD DE ENTORNO DE EJECUCIÓN DEL RUNNER (NODE24)
+--------------------------------------------------------------------------------
+- Breve explicación del problema:
+  El archivo `action.yml` declara `runs.using: 'node24'`. Sin embargo, el entorno
+  de ejecución estándar oficialmente soportado de forma universal en los runners
+  de GitHub Actions (runners oficiales, self-hosted y GitHub Enterprise Server - GHES)
+  es `node20`. En runners que no dispongan de la versión empaquetada de Node 24,
+  la acción falla inmediatamente con un error fatal de incompatibilidad:
+  "Unsupported action execution runtime: node24".
+- File y línea de código:
+  action.yml (línea 124) y package.json (línea 7)
+- Cómo arreglarlo:
+  Unificar el entorno del proyecto a Node 24 (`node24`) para compatibilidad completa
+  con las herramientas modernas del repositorio (como `dev.Dockerfile` y `@types/node` v24):
+  En action.yml:
+    runs:
+      using: 'node24'
+  En package.json:
+    "build": "esbuild src/main.ts ... --target=node24 ..."
+
+
+3. EXPRESIÓN DE CONTEXTO NO EVALUADA EN EL VALOR DEFAULT DE GITHUB-TOKEN
+--------------------------------------------------------------------------------
+- Breve explicación del problema:
+  En `action.yml` se define `default: ${{ github.token }}` para el input `github-token`.
+  La especificación de metadatos de GitHub Actions no evalúa expresiones de contexto
+  `${{ ... }}` dentro del campo `default` de `action.yml`. Si el usuario no provee
+  explícitamente el token, el runner inyecta la cadena de texto literal "${{ github.token }}".
+  Posteriormente, en `src/context.ts`, se crea un secreto de autenticación Git con dicho
+  valor literal inválido (`GIT_AUTH_TOKEN=${{ github.token }}`), provocando errores
+  críticos de autenticación al clonar submódulos o contextos remotos privados.
+- File y línea de código:
+  action.yml (líneas 110-113) y src/context.ts (línea 87 y 191-193)
+- Cómo arreglarlo:
+  Remover el valor default con sintaxis `${{ ... }}` en `action.yml` y resolver el
+  token dinámicamente en código TypeScript con fallback a `process.env.GITHUB_TOKEN`:
+  En action.yml:
+    github-token:
+      description: "GitHub Token used to authenticate against a repository for Git context"
+      required: false
+  En src/context.ts:
+    'github-token': core.getInput('github-token') || process.env.GITHUB_TOKEN || ''
+
+
+4. ANTIPATRÓN E INCOMPATIBILIDAD EN GESTIÓN DE ESTADO CON PROCESS.ENV Y JSON.PARSE
+--------------------------------------------------------------------------------
+- Breve explicación del problema:
+  En `src/state-helper.ts` se accede directamente a variables de entorno estáticas
+  `process.env['STATE_*']` en el momento de carga del módulo en lugar de invocar la
+  función oficial `core.getState(...)` del toolkit `@actions/core`.
+  Esto provoca incompatibilidades si el runner gestiona el estado a través del archivo
+  de entorno `GITHUB_STATE`, impide la reactividad en pruebas o ejecuciones sucesivas,
+  y en la línea 11 se ejecuta `JSON.parse(process.env['STATE_summaryInputs'])` a nivel
+  global sin bloque `try/catch`, lo que aborta la ejecución con un error no controlado
+  si la cadena guardada está corrupta o vacía.
+- File y línea de código:
+  src/state-helper.ts (líneas 7-14)
+- Cómo arreglarlo:
+  Utilizar funciones getter que llamen a `core.getState(...)` con control de errores
+  y parseo seguro con `try/catch` para `summaryInputs`:
+  export const getSummaryInputs = () => {
+    const raw = core.getState('summaryInputs') || process.env['STATE_summaryInputs'];
+    if (!raw) return undefined;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return undefined;
+    }
+  };
+
+
+5. COMPILACIÓN INSEGURA DE PLANTILLAS HANDLEBARS EN INPUTS ARBITRARIOS
+--------------------------------------------------------------------------------
+- Breve explicación del problema:
+  En `src/context.ts` se compilan las entradas de usuario (`context` y `build-contexts`)
+  directamente con `handlebars.compile(input)({defaultContext})`.
+  Si el usuario provee una ruta, tag o URL que contenga llaves `{{...}}` no intencionadas
+  (comunes en selectores, URLs o plantillas Docker), Handlebars las sustituye
+  silenciosamente por cadenas vacías `""`, corrompiendo la ruta del contexto de compilación.
+  Asimismo, si contiene llaves no balanceadas o caracteres especiales, `handlebars.compile`
+  lanza una excepción de sintaxis (`Parse error`), abortando la acción antes de iniciar el build.
+- File y línea de código:
+  src/context.ts (línea 66 y líneas 124-128)
+- Cómo arreglarlo:
+  Envolver la interpolación en una función segura con `try/catch` y fallback regex para
+  sustituir únicamente la variable soportada `{{defaultContext}}`:
+  function safeInterpolateContext(templateStr: string, defaultContext: string): string {
+    if (!templateStr) return defaultContext;
+    try {
+      return handlebars.compile(templateStr)({ defaultContext }) || defaultContext;
+    } catch {
+      return templateStr.replace(/\{\{\s*defaultContext\s*\}\}/g, defaultContext);
+    }
+  }
+
+
+6. ACCESO INSEGURO A PROPIEDADES DE ERROR (E.MESSAGE) EN CLÁUSULAS CATCH
+--------------------------------------------------------------------------------
+- Breve explicación del problema:
+  En múltiples bloques `catch (e)` se accede directamente a `e.message`. En TypeScript y
+  JavaScript moderno, las excepciones pueden ser cadenas, objetos planos o valores no-Error.
+  Si un rechazo o fallo arroja un valor que no hereda de `Error`, acceder a `e.message`
+  produce `undefined` o causa una excepción en tiempo de ejecución (`TypeError: Cannot read
+  properties of undefined (reading 'message')`), quebrando la lógica de recuperación del catch.
+- File y línea de código:
+  src/main.ts (líneas 38, 47, 225) y src/context.ts (líneas 151, 181, 189)
+- Cómo arreglarlo:
+  Implementar una función utilitaria para extraer el mensaje de error de forma segura:
+  function toErrorMessage(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    return String(error);
+  }

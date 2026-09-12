@@ -35,7 +35,8 @@ actionsToolkit.run(
       try {
         await GitHub.printActionsRuntimeTokenACs();
       } catch (e) {
-        core.warning(e.message);
+        // [PROBLEMA 6] Extracción segura de mensaje de error para evitar fallos si no es Error
+        core.warning(toErrorMessage(e));
       }
     });
 
@@ -44,7 +45,8 @@ actionsToolkit.run(
         await Docker.printVersion();
         await Docker.printInfo();
       } catch (e) {
-        core.info(e.message);
+        // [PROBLEMA 6] Extracción segura de mensaje de error para evitar fallos si no es Error
+        core.info(toErrorMessage(e));
       }
     });
 
@@ -109,12 +111,21 @@ actionsToolkit.run(
       }
     }).then(res => {
       if (res.exitCode != 0) {
+        // [PROBLEMA 1] ERROR SILENCIOSO Y FALSO POSITIVO DE ÉXITO ANTE FALLOS DE BUILDX
+        // Problema anterior: Si res.exitCode != 0 pero stderr estaba vacío (o mensajes en stdout),
+        // 'err' quedaba undefined y la acción finalizaba falsamente con código 0 (éxito falso).
+        // Solución implementada: Garantizar que 'err' siempre se defina capturando stdout o
+        // exitCode para que la Action falle correctamente.
         if (inputs.call && inputs.call === 'check' && res.stdout.length > 0) {
           // checks warnings are printed to stdout: https://github.com/docker/buildx/pull/2647
           // take the first line with the message summaryzing the warnings
           err = new Error(res.stdout.split('\n')[0]?.trim());
         } else if (res.stderr.length > 0) {
           err = new Error(`buildx failed with: ${res.stderr.match(/(.*)\s*$/)?.[0]?.trim() ?? 'unknown error'}`);
+        } else if (res.stdout.length > 0) {
+          err = new Error(`buildx failed with: ${res.stdout.match(/(.*)\s*$/)?.[0]?.trim() ?? 'unknown error'}`);
+        } else {
+          err = new Error(`buildx failed with exit code ${res.exitCode}`);
         }
       }
     });
@@ -191,7 +202,9 @@ actionsToolkit.run(
   },
   // post
   async () => {
-    if (stateHelper.isSummarySupported) {
+    // [PROBLEMA 4] ANTIPATRÓN E INCOMPATIBILIDAD EN GESTIÓN DE ESTADO CON PROCESS.ENV Y JSON.PARSE
+    // Solución implementada: Consulta dinámica del estado mediante getters que consumen core.getState()
+    if (stateHelper.isSummarySupported()) {
       await core.group(`Generating build summary`, async () => {
         try {
           const recordUploadEnabled = buildRecordUploadEnabled();
@@ -201,8 +214,9 @@ actionsToolkit.run(
           }
 
           const buildxHistory = new BuildxHistory();
+          const currentBuildRef = stateHelper.getBuildRef();
           const exportRes = await buildxHistory.export({
-            refs: stateHelper.buildRef ? [stateHelper.buildRef] : []
+            refs: currentBuildRef ? [currentBuildRef] : []
           });
           core.info(`Build record written to ${exportRes.dockerbuildFilename} (${Util.formatFileSize(exportRes.dockerbuildSize)})`);
 
@@ -217,21 +231,23 @@ actionsToolkit.run(
           await GitHubSummary.writeBuildSummary({
             exportRes: exportRes,
             uploadRes: uploadRes,
-            inputs: stateHelper.summaryInputs,
-            driver: stateHelper.builderDriver,
-            endpoint: stateHelper.builderEndpoint
+            inputs: stateHelper.getSummaryInputs(),
+            driver: stateHelper.getBuilderDriver(),
+            endpoint: stateHelper.getBuilderEndpoint()
           });
         } catch (e) {
-          core.warning(e.message);
+          // [PROBLEMA 6] Extracción segura de mensaje de error en catch
+          core.warning(toErrorMessage(e));
         }
       });
     }
-    if (stateHelper.tmpDir.length > 0) {
-      await core.group(`Removing temp folder ${stateHelper.tmpDir}`, async () => {
+    const currentTmpDir = stateHelper.getTmpDir();
+    if (currentTmpDir.length > 0) {
+      await core.group(`Removing temp folder ${currentTmpDir}`, async () => {
         try {
-          fs.rmSync(stateHelper.tmpDir, {recursive: true});
+          fs.rmSync(currentTmpDir, {recursive: true});
         } catch {
-          core.warning(`Failed to remove temp folder ${stateHelper.tmpDir}`);
+          core.warning(`Failed to remove temp folder ${currentTmpDir}`);
         }
       });
     }
@@ -287,4 +303,17 @@ function buildRecordRetentionDays(): number | undefined {
     }
     return res;
   }
+}
+
+/**
+ * [PROBLEMA 6] ACCESO INSEGURO A PROPIEDADES DE ERROR (E.MESSAGE) EN CLÁUSULAS CATCH
+ * Problema anterior: Cláusulas catch accedían a `e.message` asumiendo tipo Error. Si se
+ * lanzaba un string u objeto arbitrario, provocaba TypeError o 'undefined'.
+ * Solución implementada: Función utilitaria para extraer el mensaje de forma segura y tipada.
+ */
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
 }

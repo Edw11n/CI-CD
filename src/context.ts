@@ -13,6 +13,37 @@ async function getDefaultContext(): Promise<string> {
   return await defaultContextPromise;
 }
 
+/**
+ * [PROBLEMA 5] COMPILACIÓN INSEGURA DE PLANTILLAS HANDLEBARS EN INPUTS ARBITRARIOS
+ * Problema anterior: `handlebars.compile(input)` directo borraba expresiones {{...}}
+ * no definidas en tags/URLs o fallaba con excepción de sintaxis si había llaves rotas.
+ * Solución implementada: Compilación protegida con try/catch y fallback seguro a regex
+ * que sustituye únicamente {{defaultContext}} si Handlebars falla o la plantilla es inválida.
+ */
+function interpolateContext(templateStr: string, defaultContext: string): string {
+  if (!templateStr) {
+    return defaultContext;
+  }
+  try {
+    return handlebars.compile(templateStr)({defaultContext}) || defaultContext;
+  } catch (err) {
+    core.debug(`Handlebars interpolation failed for "${templateStr}", using fallback: ${toErrorMessage(err)}`);
+    return templateStr.replace(/\{\{\s*defaultContext\s*\}\}/g, defaultContext);
+  }
+}
+
+/**
+ * [PROBLEMA 6] ACCESO INSEGURO A PROPIEDADES DE ERROR (ERR.MESSAGE) EN CLÁUSULAS CATCH
+ * Problema anterior: Cláusulas catch asumían que err siempre hereda de Error.
+ * Solución implementada: Extracción segura de mensajes de error con soporte para cualquier tipo.
+ */
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
 export interface Inputs {
   'add-hosts': string[];
   allow: string[];
@@ -63,7 +94,9 @@ export async function getInputs(): Promise<Inputs> {
     'cache-to': Util.getInputList('cache-to', {ignoreComma: true}),
     call: core.getInput('call'),
     'cgroup-parent': core.getInput('cgroup-parent'),
-    context: handlebars.compile(core.getInput('context'))({defaultContext}) || defaultContext,
+    // [PROBLEMA 5] Compilación directa con Handlebars sin control de excepciones de sintaxis.
+    // Solución implementada: Uso de función segura interpolateContext().
+    context: interpolateContext(core.getInput('context'), defaultContext),
     file: core.getInput('file'),
     labels: Util.getInputList('labels', {ignoreComma: true}),
     load: core.getBooleanInput('load'),
@@ -84,7 +117,10 @@ export async function getInputs(): Promise<Inputs> {
     tags: Util.getInputList('tags'),
     target: core.getInput('target'),
     ulimit: Util.getInputList('ulimit', {ignoreComma: true}),
-    'github-token': core.getInput('github-token')
+    // [PROBLEMA 3] EXPRESIÓN DE CONTEXTO NO EVALUADA EN EL VALOR DEFAULT DE GITHUB-TOKEN
+    // Problema anterior: action.yml tenía `default: ${{ github.token }}` no evaluado por el runner.
+    // Solución implementada: Leer el input o recurrir de forma segura a process.env.GITHUB_TOKEN.
+    'github-token': core.getInput('github-token') || process.env.GITHUB_TOKEN || ''
   };
 }
 
@@ -119,12 +155,9 @@ async function getBuildArgs(inputs: Inputs, context: string, toolkit: Toolkit): 
   });
   if (await toolkit.buildx.versionSatisfies('>=0.8.0')) {
     await Util.asyncForEach(inputs['build-contexts'], async buildContext => {
-      args.push(
-        '--build-context',
-        handlebars.compile(buildContext)({
-          defaultContext: defaultContext
-        })
-      );
+      // [PROBLEMA 5] Compilación directa con Handlebars sin control de excepciones de sintaxis.
+      // Solución implementada: Uso de interpolateContext() con fallback seguro para build-contexts.
+      args.push('--build-context', interpolateContext(buildContext, defaultContext));
     });
   } else if (inputs['build-contexts'].length > 0) {
     core.warning("Build contexts are only supported by buildx >= 0.8.0; the input 'build-contexts' is ignored.");
@@ -148,7 +181,8 @@ async function getBuildArgs(inputs: Inputs, context: string, toolkit: Toolkit): 
     try {
       args.push('--secret', Build.resolveSecretEnv(secretEnv));
     } catch (err) {
-      core.warning(err.message);
+      // [PROBLEMA 6] Extracción segura de mensaje de error
+      core.warning(toErrorMessage(err));
     }
   });
   if (inputs.file) {
@@ -178,14 +212,16 @@ async function getBuildArgs(inputs: Inputs, context: string, toolkit: Toolkit): 
     try {
       args.push('--secret', Build.resolveSecretString(secret));
     } catch (err) {
-      core.warning(err.message);
+      // [PROBLEMA 6] Extracción segura de mensaje de error
+      core.warning(toErrorMessage(err));
     }
   });
   await Util.asyncForEach(inputs['secret-files'], async secretFile => {
     try {
       args.push('--secret', Build.resolveSecretFile(secretFile));
     } catch (err) {
-      core.warning(err.message);
+      // [PROBLEMA 6] Extracción segura de mensaje de error
+      core.warning(toErrorMessage(err));
     }
   });
   if (inputs['github-token'] && !Build.hasGitAuthTokenSecret(inputs.secrets) && context.startsWith(defaultContext)) {

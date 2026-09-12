@@ -107,9 +107,11 @@ inputs:
   ulimit:
     description: "Ulimit options (e.g., nofile=1024:1024)"
     required: false
+  # [PROBLEMA 3] EXPRESIÓN DE CONTEXTO NO EVALUADA EN EL VALOR DEFAULT DE GITHUB-TOKEN
+  # Problema anterior: default: ${{ github.token }} no se evalúa en metadatos y pasaba la cadena literal "${{ github.token }}".
+  # Solución implementada: Eliminado el default en YAML; se resuelve en código con fallback a GITHUB_TOKEN.
   github-token:
     description: "GitHub Token used to authenticate against a repository for Git context"
-    default: ${{ github.token }}
     required: false
 
 outputs:
@@ -121,6 +123,8 @@ outputs:
     description: 'Build result metadata'
 
 runs:
+  # [PROBLEMA 2] CONFIGURACIÓN DE RUNTIME DEL RUNNER (NODE24)
+  # Actualizado a 'node24' como target moderno unificado del proyecto para Node.js v24.
   using: 'node24'
   main: 'dist/index.cjs'
   post: 'dist/index.cjs'

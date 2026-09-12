@@ -68,6 +68,13 @@ jobs:
         if: inputs.provider == 'gitlab'
         run: |
           echo "BUILDX_NO_DEFAULT_OCI_ARTIFACT=true" >> "$GITHUB_ENV"
+      # [CAMBIO / SOLUCIÓN]: Configurar slug dinámico en minúsculas para GHCR según el repositorio actual (soporte para forks)
+      -
+        name: Set up GHCR slug
+        if: inputs.provider == 'ghcr'
+        run: |
+          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "REGISTRY_SLUG=ghcr.io/${REPO_LOWER}/build-push-action-test" >> "$GITHUB_ENV"
       -
         name: Set up BuildKit config
         env:
@@ -119,16 +126,38 @@ jobs:
           driver-opts: |
             image=${{ matrix.buildkit_image }}
             network=host
+      # [CAMBIO / SOLUCIÓN]: Solo asumir rol IAM de AWS si se ejecuta en el repositorio oficial de Docker
       -
         name: Configure AWS credentials
-        if: inputs.provider == 'aws'
+        if: inputs.provider == 'aws' && github.repository == 'docker/build-push-action'
         uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: arn:aws:iam::175142243308:role/official_gha_cicd
           aws-region: us-east-1
+      # [CAMBIO / SOLUCIÓN]: Comprobar si se tienen credenciales válidas para el registro actual (evita fallos en forks)
+      -
+        name: Check registry credentials
+        id: check_auth
+        env:
+          REG_USER: ${{ secrets.registry_username }}
+          REG_PASS: ${{ secrets.registry_password }}
+          DH_OIDC: ${{ vars.DOCKERHUB_OIDC_CONNECTIONID }}
+        run: |
+          CAN_AUTH=false
+          if [ "${{ inputs.type }}" = "local" ] || [ "${{ inputs.provider }}" = "ghcr" ]; then
+            CAN_AUTH=true
+          elif [ "${{ inputs.provider }}" = "aws" ] && [ "${{ github.repository }}" = "docker/build-push-action" ]; then
+            CAN_AUTH=true
+          elif [ "${{ inputs.provider }}" = "dockerhub" ] && [ -n "${DH_OIDC}" ]; then
+            CAN_AUTH=true
+          elif [ -n "${REG_USER}" ] && [ -n "${REG_PASS}" ]; then
+            CAN_AUTH=true
+          fi
+          echo "can_auth=${CAN_AUTH}" >> "$GITHUB_OUTPUT"
+      # [CAMBIO / SOLUCIÓN]: Solo intentar docker login si se dispone de credenciales para evitar excepciones de autenticación
       -
         name: Login to Registry
-        if: github.event_name != 'pull_request' && (inputs.type == 'remote' || inputs.provider == 'aws' || env.REGISTRY_USER != '')
+        if: github.event_name != 'pull_request' && steps.check_auth.outputs.can_auth == 'true'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         env:
           DOCKERHUB_OIDC_CONNECTIONID: ${{ inputs.provider == 'dockerhub' && vars.DOCKERHUB_OIDC_CONNECTIONID || '' }}
@@ -137,6 +166,7 @@ jobs:
           username: ${{ env.REGISTRY_USER || secrets.registry_username || (inputs.registry == 'ghcr.io' && github.actor) || '' }}
           password: ${{ env.REGISTRY_PASSWORD || secrets.registry_password || (inputs.registry == 'ghcr.io' && secrets.GITHUB_TOKEN) || '' }}
           scope: ${{ inputs.type == 'remote' && inputs.registry == '' && '@push' || '' }}
+      # [CAMBIO / SOLUCIÓN]: Realizar 'push: true' únicamente si el registro está autenticado; en caso contrario solo valida el build
       -
         name: Build and push
         uses: ./
@@ -144,8 +174,8 @@ jobs:
           context: ./test
           file: ./test/multi.Dockerfile
           platforms: linux/386,linux/amd64,linux/arm/v6,linux/arm/v7,linux/arm64,linux/ppc64le,linux/s390x
-          push: ${{ github.event_name != 'pull_request' }}
+          push: ${{ github.event_name != 'pull_request' && steps.check_auth.outputs.can_auth == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.REGISTRY_SLUG || inputs.slug }}:master
-          cache-to: type=inline
+          cache-from: ${{ steps.check_auth.outputs.can_auth == 'true' && format('type=registry,ref={0}:master', env.REGISTRY_SLUG || inputs.slug) || '' }}
+          cache-to: ${{ steps.check_auth.outputs.can_auth == 'true' && 'type=inline' || '' }}

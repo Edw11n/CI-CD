@@ -143,3 +143,102 @@ Repositorio: docker/build-push-action
     if (error instanceof Error) return error.message;
     return String(error);
   }
+
+
+7. REPOSITORIO Y ORGANIZACIÓN HARDCODEADOS EN GENERACIÓN DE TOKENS DE GITHUB APP
+--------------------------------------------------------------------------------
+- Breve explicación del problema:
+  En `.github/workflows/update-dist.yml`, el paso de autenticación `actions/create-github-app-token`
+  especificaba valores fijos `owner: docker` y `repositories: build-push-action`.
+  En forks o entornos fuera de la organización oficial `docker` (como `Edw11n/CI-CD`),
+  el workflow fallaba inmediatamente al intentar solicitar tokens sobre un repositorio ajeno.
+- File y línea de código:
+  .github/workflows/update-dist.yml (líneas 28-29)
+- Cómo arreglarlo:
+  Reemplazar los valores hardcodeados por referencias dinámicas al contexto de GitHub:
+  owner: ${{ github.repository_owner }}
+  repositories: ${{ github.event.repository.name }}
+
+
+8. ORDEN DE EJECUCIÓN INVERTIDO DE SETUP-NODE Y COREPACK EN WORKFLOW DE CODEQL
+--------------------------------------------------------------------------------
+- Breve explicación del problema:
+  En `.github/workflows/codeql.yml`, el paso `Enable corepack` (`corepack enable`)
+  se ejecutaba antes de `actions/setup-node`. Al ejecutarse previamente a la instalación
+  y configuración de Node.js (Node 24), Corepack se ejecutaba sobre la versión global
+  predeterminada del runner en lugar de la versión de Node definida para la acción,
+  desincronizando el runtime del CI.
+- File y línea de código:
+  .github/workflows/codeql.yml (líneas 27-35)
+- Cómo arreglarlo:
+  Reordenar los pasos para invocar `actions/setup-node` antes de habilitar Corepack:
+  - name: Set up Node
+    uses: actions/setup-node@...
+    with:
+      node-version: ${{ env.NODE_VERSION }}
+  - name: Enable corepack
+    run: |
+      corepack enable
+      yarn --version
+
+
+================================================================================
+INFORME SEPARADO: ERRORES DE WORKFLOWS EN EJECUCIÓN (FORKS, E2E Y REGISTRIES)
+================================================================================
+
+9. FALLO EN PUSH A GITHUB PACKAGES (GHCR) POR NAMESPACE HARDCODEADO
+--------------------------------------------------------------------------------
+- Breve explicación del problema:
+  Al ejecutarse el workflow de pruebas e2e en un repositorio bifurcado (fork),
+  la matriz de `e2e.yml` intentaba publicar la imagen en `ghcr.io/docker/build-push-action-test`.
+  El token de autenticación del runner (`GITHUB_TOKEN`) solo cuenta con permisos de
+  escritura en el namespace del propietario del fork (`ghcr.io/edw11n/...`), por lo
+  que GitHub Packages rechazaba la operación con el error fatal:
+  `denied: permission_denied: The requested installation does not exist`.
+- File y línea de código:
+  .github/workflows/e2e.yml (línea 45) y .github/workflows/.e2e-run.yml (línea 73)
+- Cómo arreglarlo:
+  Dinamicizar el slug de la imagen Docker en `e2e.yml` usando el owner del repositorio,
+  y en `.e2e-run.yml` normalizar el identificador a minúsculas (`tr '[:upper:]' '[:lower:]'`)
+  antes de exportar la variable `REGISTRY_SLUG`, permitiendo que el push se dirija
+  al namespace correcto del fork con los permisos de `packages: write`.
+
+
+10. FALLOS DE AUTENTICACIÓN EN MATRIZ DE REGISTROS REMOTOS (AWS, DOCKER HUB, CLOUD)
+--------------------------------------------------------------------------------
+- Breve explicación del problema:
+  La matriz del workflow `e2e.yml` incluye registros externos corporativos propiedad
+  de Docker Inc. (AWS ECR `175142243308`, Azure, Docker Hub OIDC, Google Artifact
+  Registry, GitLab, Quay, Artifactory). En repositorios clonados o forks, los secretos
+  organizacionales (`vars.DOCKERHUB_OIDC_CONNECTIONID`, roles de AWS STS, tokens)
+  no existen. El workflow intentaba iniciar sesión y hacer `push` de forma incondicional,
+  provocando más de 25 errores fatales en tiempo de ejecución:
+  `Username and password required`, `Could not assume role with OIDC` y `DOCKERHUB_OIDC_CONNECTIONID is required`.
+- File y línea de código:
+  .github/workflows/.e2e-run.yml (líneas 123-155)
+- Cómo arreglarlo:
+  1. Restringir la asunción del rol IAM de AWS al repositorio oficial upstream.
+  2. Implementar un paso evaluador `check_auth` que compruebe la presencia real de
+     secretos o si es un registro local/GHCR.
+  3. Ejecutar `docker/login-action` y fijar `push: true` únicamente si existen
+     credenciales válidas; para registros remotos sin secretos configurados en forks,
+     se valida exitosamente la compilación multi-plataforma de la imagen (`push: false`)
+     sin intentar una subida no autorizada.
+
+
+11. EXCEPCIÓN FATAL POR APP-ID VACÍO Y DEPRECADO EN UPDATE-DIST.YML
+--------------------------------------------------------------------------------
+- Breve explicación del problema:
+  En `.github/workflows/update-dist.yml`, el paso `actions/create-github-app-token`
+  utilizaba el parámetro `app-id` (marcado como deprecado por GitHub en favor de
+  `client-id`). Además, al ejecutarse en un entorno sin el secret
+  `secrets.GHACTIONS_REPO_WRITE_APP_ID`, el valor resultaba en cadena vacía `""`,
+  generando un error fatal que abortaba el job:
+  `Error: The 'client-id' (or deprecated 'app-id') input must be set to a non-empty string`.
+- File y línea de código:
+  .github/workflows/update-dist.yml (líneas 21-38)
+- Cómo arreglarlo:
+  Actualizar `app-id` a `client-id`, condicionar la ejecución del paso a la existencia
+  del secreto (`if: secrets.GHACTIONS_REPO_WRITE_APP_ID != ''`), asignar permisos
+  `contents: write` al job, y proveer un fallback a `secrets.GITHUB_TOKEN` en el paso
+  de `actions/checkout` para que los forks puedan actualizar el dist automáticamente.

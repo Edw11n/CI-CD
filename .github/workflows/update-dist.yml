@@ -15,26 +15,31 @@ on:
 
 jobs:
   update-dist:
-    if: github.actor == 'dependabot[bot]' && github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == github.event.pull_request.head.repo.full_name
+    if: (github.actor == 'dependabot[bot]' || github.actor_id == 49699333) && github.event.pull_request.user.login == 'dependabot[bot]' && github.repository == github.event.pull_request.head.repo.full_name
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
+      # [CAMBIO / SOLUCIÓN]: Se actualiza 'app-id' (deprecado) por 'client-id' y se ejecuta solo si el secret existe (evita error fatal en forks)
       -
         name: GitHub auth token from GitHub App
+        if: secrets.GHACTIONS_REPO_WRITE_APP_ID != ''
         id: docker-read-app
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
-          app-id: ${{ secrets.GHACTIONS_REPO_WRITE_APP_ID }}
+          client-id: ${{ secrets.GHACTIONS_REPO_WRITE_APP_ID }}
           private-key: ${{ secrets.GHACTIONS_REPO_WRITE_APP_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
+      # [CAMBIO / SOLUCIÓN]: Uso de fallback a secrets.GITHUB_TOKEN para repositorios bifurcados que carecen de GitHub App
       -
         name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 0
-          token: ${{ steps.docker-read-app.outputs.token }}
+          token: ${{ steps.docker-read-app.outputs.token || secrets.GITHUB_TOKEN }}
       -
         name: Build
         uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0

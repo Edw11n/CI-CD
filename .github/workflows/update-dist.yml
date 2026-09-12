@@ -20,10 +20,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      # [CAMBIO / SOLUCIÓN]: Se actualiza 'app-id' (deprecado) por 'client-id' y se ejecuta solo si el secret existe (evita error fatal en forks)
+      # [CAMBIO / SOLUCIÓN]: Validar pertenencia al repo oficial en el 'if' (GitHub Actions prohíbe 'secrets' en expresiones if)
       -
         name: GitHub auth token from GitHub App
-        if: secrets.GHACTIONS_REPO_WRITE_APP_ID != ''
+        if: github.repository == 'docker/build-push-action'
         id: docker-read-app
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:

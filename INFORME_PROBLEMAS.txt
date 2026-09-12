@@ -204,41 +204,42 @@ INFORME SEPARADO: ERRORES DE WORKFLOWS EN EJECUCIÓN (FORKS, E2E Y REGISTRIES)
   al namespace correcto del fork con los permisos de `packages: write`.
 
 
-10. FALLOS DE AUTENTICACIÓN EN MATRIZ DE REGISTROS REMOTOS (AWS, DOCKER HUB, CLOUD)
+10. FALLOS DE AUTENTICACIÓN EN REGISTROS REMOTOS Y EN REGISTROS LOCALES ANÓNIMOS
 --------------------------------------------------------------------------------
 - Breve explicación del problema:
   La matriz del workflow `e2e.yml` incluye registros externos corporativos propiedad
   de Docker Inc. (AWS ECR `175142243308`, Azure, Docker Hub OIDC, Google Artifact
-  Registry, GitLab, Quay, Artifactory). En repositorios clonados o forks, los secretos
-  organizacionales (`vars.DOCKERHUB_OIDC_CONNECTIONID`, roles de AWS STS, tokens)
-  no existen. El workflow intentaba iniciar sesión y hacer `push` de forma incondicional,
-  provocando más de 25 errores fatales en tiempo de ejecución:
-  `Username and password required`, `Could not assume role with OIDC` y `DOCKERHUB_OIDC_CONNECTIONID is required`.
+  Registry, GitLab, Quay, Artifactory) que requieren secretos inexistentes en forks.
+  Asimismo, en la suite local, `Distribution` es un registro local anónimo (sin auth)
+  a diferencia de `Harbor` y `Nexus` (que sí configuran `REGISTRY_USER`). Si el paso
+  `Login to Registry` se ejecuta incondicionalmente para `Distribution`, `docker/login-action`
+  falla con: `Username and password required`.
 - File y línea de código:
-  .github/workflows/.e2e-run.yml (líneas 123-155)
+  .github/workflows/.e2e-run.yml (líneas 130-175)
 - Cómo arreglarlo:
   1. Restringir la asunción del rol IAM de AWS al repositorio oficial upstream.
-  2. Implementar un paso evaluador `check_auth` que compruebe la presencia real de
-     secretos o si es un registro local/GHCR.
-  3. Ejecutar `docker/login-action` y fijar `push: true` únicamente si existen
-     credenciales válidas; para registros remotos sin secretos configurados en forks,
-     se valida exitosamente la compilación multi-plataforma de la imagen (`push: false`)
-     sin intentar una subida no autorizada.
+  2. Implementar un evaluador `check_auth` que distinga entre registros que permiten
+     `push` (`can_push`) y aquellos que realmente requieren login (`needs_login`),
+     permitiendo a `Distribution` omitir el login mientras `Harbor`, `Nexus` y `GHCR`
+     se autentican debidamente.
+  3. Para registros remotos sin secretos en forks, se valida la compilación (`push: false`)
+     sin intentar una subida no autorizada ni invocar logins fallidos.
 
 
-11. EXCEPCIÓN FATAL POR APP-ID VACÍO Y DEPRECADO EN UPDATE-DIST.YML
+11. EXCEPCIÓN FATAL POR 'SECRETS' EN EXPRESIÓN IF Y CLIENT-ID DEPRECADO
 --------------------------------------------------------------------------------
 - Breve explicación del problema:
   En `.github/workflows/update-dist.yml`, el paso `actions/create-github-app-token`
-  utilizaba el parámetro `app-id` (marcado como deprecado por GitHub en favor de
-  `client-id`). Además, al ejecutarse en un entorno sin el secret
-  `secrets.GHACTIONS_REPO_WRITE_APP_ID`, el valor resultaba en cadena vacía `""`,
-  generando un error fatal que abortaba el job:
-  `Error: The 'client-id' (or deprecated 'app-id') input must be set to a non-empty string`.
+  utilizaba `app-id` (deprecado en favor de `client-id`). Además, en GitHub Actions
+  el contexto `secrets` está explícitamente prohibido dentro de expresiones `if:`
+  (`if: secrets.GHACTIONS...`), arrojando un error de sintaxis al evaluar el flujo:
+  `Invalid workflow file: Unrecognized named-value: 'secrets'`.
 - File y línea de código:
   .github/workflows/update-dist.yml (líneas 21-38)
 - Cómo arreglarlo:
-  Actualizar `app-id` a `client-id`, condicionar la ejecución del paso a la existencia
-  del secreto (`if: secrets.GHACTIONS_REPO_WRITE_APP_ID != ''`), asignar permisos
-  `contents: write` al job, y proveer un fallback a `secrets.GITHUB_TOKEN` en el paso
-  de `actions/checkout` para que los forks puedan actualizar el dist automáticamente.
+  1. Actualizar `app-id` a `client-id`.
+  2. Condicionar el paso en base al repositorio oficial (`if: github.repository == 'docker/build-push-action'`),
+     evitando el uso ilegal del contexto `secrets` en el `if`.
+  3. Asignar permisos `contents: write` al job y proveer un fallback a `secrets.GITHUB_TOKEN`
+     en el paso de checkout (`token: ${{ steps.docker-read-app.outputs.token || secrets.GITHUB_TOKEN }}`)
+     para que los forks puedan actualizar el dist automáticamente.
